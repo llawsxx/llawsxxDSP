@@ -123,9 +123,9 @@ int main(int argc, char** argv) {
     const float eqAfter = effect->getParameter(effect, 0);
     if ((eqBefore >= 0.5f) == (eqAfter >= 0.5f)) return 11;
     const float gainBefore = effect->getParameter(effect, 2);
-    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(100, 480));
-    SendMessageW(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(200, 480));
-    SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(200, 480));
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(390, 437));
+    SendMessageW(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(490, 437));
+    SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(490, 437));
     if (effect->getParameter(effect, 2) <= gainBefore) return 12;
     SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(250, 365));
     SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(250, 365));

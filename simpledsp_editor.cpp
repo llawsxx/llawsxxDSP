@@ -117,10 +117,12 @@ private:
     RECT moduleRect(int module) const { int x=104+module*198; return RECT{x,SwitchTop,x+178,SwitchTop+27}; }
     RECT tabRect(int tab) const { int x=20+tab*220; return RECT{x,TabTop,x+210,TabTop+34}; }
     RECT controlRect(int slot) const {
-        if(selectedTab==0){int band=slot/3,row=slot%3;int x=20+band*220,y=ContentTop+row*66;return RECT{x,y,x+205,y+56};}
+        if(selectedTab==0){int band=slot/3,column=slot%3;int x=20+column*293,y=ContentTop+band*61;return RECT{x,y,x+280,y+54};}
         int column=slot%2,row=slot/2;int x=60+column*420,y=ContentTop+row*70;return RECT{x,y,x+360,y+58};
     }
     RECT inputRect(int slot) const { RECT r=controlRect(slot); return RECT{r.right-82,r.top+5,r.right-7,r.top+27}; }
+    int sliderStart(const RECT& r) const { return selectedTab==0?r.left+10:r.left+72; }
+    int sliderY(const RECT& r) const { return selectedTab==0?r.top+39:r.top+29; }
 
     void drawModules(HDC dc){
         text(dc,20,321,RGB(176,184,195),"DSP:");
@@ -152,16 +154,15 @@ private:
                 text(dc,r.left+109,r.top+9,RGB(245,247,250),value>=.5f?"ON":"OFF");
             }else{
                 RECT input=inputRect(slot);
-                int start=r.left+72,end=input.left-9,knob=start+(int)((end-start)*value);
-                line(dc,start,r.top+29,end,r.top+29,RGB(64,70,80),5);
-                line(dc,start,r.top+29,knob,r.top+29,RGB(64,160,225),5);
-                fill(dc,knob-4,r.top+22,knob+5,r.top+37,RGB(225,232,240));
+                int start=sliderStart(r),end=input.left-9,y=sliderY(r),knob=start+(int)((end-start)*value);
+                line(dc,start,y,end,y,RGB(64,70,80),5);
+                line(dc,start,y,knob,y,RGB(64,160,225),5);
+                fill(dc,knob-4,y-7,knob+5,y+8,RGB(225,232,240));
                 char display[48];source->uiParameterText(parameter,display,sizeof(display));
                 fill(dc,input.left,input.top,input.right,input.bottom,RGB(12,15,20));
                 line(dc,input.left,input.top,input.right,input.top,RGB(76,84,96));
                 line(dc,input.left,input.bottom,input.right,input.bottom,RGB(76,84,96));
                 text(dc,input.left+4,input.top+4,RGB(218,225,234),display);
-                text(dc,r.left+10,r.top+38,RGB(112,122,136),"Click value to type");
             }
         }
     }
@@ -186,7 +187,7 @@ private:
 
     static bool inside(const RECT& r,int x,int y){return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
     int controlAt(int x,int y) const {for(int slot=0;slot<tabCounts[selectedTab];slot++)if(inside(controlRect(slot),x,y))return slot;return -1;}
-    void setFromX(int slot,int x){int parameter=tabParams[selectedTab][slot];RECT r=controlRect(slot),input=inputRect(slot);int start=r.left+72,end=input.left-9;source->uiSetParameter(parameter,clampf((float)(x-start)/(end-start),0.f,1.f));InvalidateRect(window,nullptr,FALSE);}
+    void setFromX(int slot,int x){int parameter=tabParams[selectedTab][slot];RECT r=controlRect(slot),input=inputRect(slot);int start=sliderStart(r),end=input.left-9;source->uiSetParameter(parameter,clampf((float)(x-start)/(end-start),0.f,1.f));InvalidateRect(window,nullptr,FALSE);}
     static LRESULT CALLBACK editProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam){
         Editor* self=(Editor*)GetWindowLongPtrW(hwnd,GWLP_USERDATA);
         if(!self) return DefWindowProcW(hwnd,message,wParam,lParam);
