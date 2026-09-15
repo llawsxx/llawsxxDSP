@@ -6,9 +6,17 @@
 #include <cstdio>
 #include <vector>
 
-static VstIntPtr VSTCALLBACK host(AEffect*, VstInt32 opcode, VstInt32, VstIntPtr, void*, float) {
+static VstInt32 requestedEditorWidth = 0;
+static VstInt32 requestedEditorHeight = 0;
+
+static VstIntPtr VSTCALLBACK host(AEffect*, VstInt32 opcode, VstInt32 index, VstIntPtr value, void*, float) {
     if (opcode == audioMasterVersion) return 2400;
-    if (opcode == audioMasterUpdateDisplay || opcode == audioMasterSizeWindow) return 1;
+    if (opcode == audioMasterSizeWindow) {
+        requestedEditorWidth = index;
+        requestedEditorHeight = static_cast<VstInt32>(value);
+        return 1;
+    }
+    if (opcode == audioMasterUpdateDisplay) return 1;
     return 0;
 }
 
@@ -111,38 +119,51 @@ int main(int argc, char** argv) {
     effect->setParameter(effect, 13, 0.f);
     effect->setParameter(effect, 14, 0.5f);
     ERect* rect = nullptr;
-    if (!effect->dispatcher(effect, effEditGetRect, 0, 0, &rect, 0) || !rect || rect->right != 920 || rect->bottom != 650) return 8;
+    if (!effect->dispatcher(effect, effEditGetRect, 0, 0, &rect, 0) || !rect || rect->right < 920 || rect->bottom < 650 ||
+        std::abs(rect->right * 650 - rect->bottom * 920) > 920) return 8;
+    const int editorWidth = rect->right;
+    const int editorHeight = rect->bottom;
+    auto editorPoint = [editorWidth, editorHeight](int x, int y) {
+        return MAKELPARAM(MulDiv(x, editorWidth, 920), MulDiv(y, editorHeight, 650));
+    };
     HWND parent = CreateWindowExW(0, L"STATIC", L"host", WS_OVERLAPPEDWINDOW, 0, 0, 1000, 750, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!parent || !effect->dispatcher(effect, effEditOpen, 0, 0, parent, 0)) return 9;
     effect->dispatcher(effect, effEditIdle, 0, 0, nullptr, 0);
     HWND editor = GetWindow(parent, GW_CHILD);
     if (!editor) return 10;
     const float eqBefore = effect->getParameter(effect, 0);
-    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(120, 325));
-    SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(120, 325));
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, editorPoint(120, 325));
+    SendMessageW(editor, WM_LBUTTONUP, 0, editorPoint(120, 325));
     const float eqAfter = effect->getParameter(effect, 0);
     if ((eqBefore >= 0.5f) == (eqAfter >= 0.5f)) return 11;
     const float gainBefore = effect->getParameter(effect, 2);
-    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(390, 437));
-    SendMessageW(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(490, 437));
-    SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(490, 437));
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, editorPoint(390, 437));
+    SendMessageW(editor, WM_MOUSEMOVE, MK_LBUTTON, editorPoint(490, 437));
+    SendMessageW(editor, WM_LBUTTONUP, 0, editorPoint(490, 437));
     if (effect->getParameter(effect, 2) <= gainBefore) return 12;
-    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(250, 365));
-    SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(250, 365));
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, editorPoint(250, 365));
+    SendMessageW(editor, WM_LBUTTONUP, 0, editorPoint(250, 365));
     const float roomBefore = effect->getParameter(effect, 14);
-    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(180, 425));
-    SendMessageW(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(350, 425));
-    SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(350, 425));
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, editorPoint(180, 425));
+    SendMessageW(editor, WM_MOUSEMOVE, MK_LBUTTON, editorPoint(350, 425));
+    SendMessageW(editor, WM_LBUTTONUP, 0, editorPoint(350, 425));
     if (effect->getParameter(effect, 14) <= roomBefore) return 16;
     HWND valueEdit = nullptr;
-    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(360, 410));
-    SendMessageW(editor, WM_LBUTTONUP, 0, MAKELPARAM(360, 410));
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, editorPoint(360, 410));
+    SendMessageW(editor, WM_LBUTTONUP, 0, editorPoint(360, 410));
     valueEdit = GetWindow(editor, GW_CHILD);
     if (!valueEdit) return 17;
     SetWindowTextA(valueEdit, "75");
     SendMessageW(valueEdit, WM_KEYDOWN, VK_RETURN, 0);
     SendMessageW(editor, WM_APP + 37, 1, 0);
     if (effect->getParameter(effect, 14) < 0.74f || effect->getParameter(effect, 14) > 0.76f) return 18;
+    SendMessageW(editor, WM_DPICHANGED, MAKELPARAM(144, 144), 0);
+    RECT scaledClient{};
+    GetClientRect(editor, &scaledClient);
+    InvalidateRect(editor, nullptr, FALSE);
+    UpdateWindow(editor);
+    if (scaledClient.right != 1380 || scaledClient.bottom != 975 ||
+        requestedEditorWidth != 1380 || requestedEditorHeight != 975) return 24;
     effect->dispatcher(effect, effEditClose, 0, 0, nullptr, 0);
     DestroyWindow(parent);
     parent = CreateWindowExW(0, L"STATIC", L"host", WS_OVERLAPPEDWINDOW, 0, 0, 1000, 750, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);

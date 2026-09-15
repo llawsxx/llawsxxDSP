@@ -26,6 +26,23 @@ namespace
         "Room", "Decay", "Damping", "Mix", "Loud On", "Target", "LRA", "TruePk", "Lim On",
         "Input", "Limit", "Release", "Ceiling", "Lookahead", "Adaptive"};
     float clampf(float x, float a, float b) { return std::max(a, std::min(b, x)); }
+    UINT windowDpi(HWND window)
+    {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        using GetDpiForWindowFn = UINT(WINAPI *)(HWND);
+        using GetDpiForSystemFn = UINT(WINAPI *)();
+        if (window)
+            if (auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(user32, "GetDpiForWindow")))
+                return std::clamp(getDpiForWindow(window), 96u, 384u);
+        if (auto getDpiForSystem = reinterpret_cast<GetDpiForSystemFn>(GetProcAddress(user32, "GetDpiForSystem")))
+            return std::clamp(getDpiForSystem(), 96u, 384u);
+        HDC screen = GetDC(nullptr);
+        UINT dpi = screen ? static_cast<UINT>(GetDeviceCaps(screen, LOGPIXELSX)) : 96u;
+        if (screen)
+            ReleaseDC(nullptr, screen);
+        return std::clamp(dpi, 96u, 384u);
+    }
+    int dpiScale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), 96); }
     void fill(HDC dc, int l, int t, int r, int b, COLORREF c)
     {
         RECT x{l, t, r, b};
@@ -51,12 +68,16 @@ namespace
     class Editor final : public AEffEditor
     {
     public:
-        Editor(AudioEffect *effect, SimpleDSPUiSource *ui) : AEffEditor(effect), source(ui) {}
+        Editor(AudioEffect *effect, SimpleDSPUiSource *ui) : AEffEditor(effect), source(ui), dpi(windowDpi(nullptr)) { updateRect(); }
         ~Editor() override { close(); }
         bool getRect(ERect **result) override
         {
-            static ERect rect{0, 0, Height, Width};
-            *result = &rect;
+            if (!window)
+            {
+                dpi = windowDpi(nullptr);
+                updateRect();
+            }
+            *result = &editorRect;
             return true;
         }
         bool isOpen() override { return window && IsWindow(window); }
@@ -64,14 +85,20 @@ namespace
         {
             if (window)
                 return true;
+            const VstInt16 previousWidth = editorRect.right;
+            const VstInt16 previousHeight = editorRect.bottom;
+            dpi = windowDpi(static_cast<HWND>(parent));
+            updateRect();
             window = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_NOTIFY,
-                                     0, 0, Width, Height, (HWND)parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+                                     0, 0, editorRect.right, editorRect.bottom, (HWND)parent, nullptr, GetModuleHandleW(nullptr), nullptr);
             if (!window)
                 return false;
             EnableWindow(window, TRUE);
             SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)this);
             original = (WNDPROC)SetWindowLongPtrW(window, GWLP_WNDPROC, (LONG_PTR)windowProc);
             systemWindow = window;
+            if (editorRect.right != previousWidth || editorRect.bottom != previousHeight)
+                static_cast<AudioEffectX *>(effect)->sizeWindow(editorRect.right, editorRect.bottom);
             SetTimer(window, 1, 33, nullptr);
             return true;
         }
@@ -108,17 +135,23 @@ namespace
                 self->paint();
                 return 0;
             case WM_LBUTTONDOWN:
-                self->mouseDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            {
+                POINT point = self->logicalPoint(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                self->mouseDown(point.x, point.y);
                 return 0;
+            }
             case WM_MOUSEMOVE:
                 if (wParam & MK_LBUTTON)
-                    self->mouseMove(GET_X_LPARAM(lParam));
+                    self->mouseMove(self->logicalPoint(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)).x);
                 return 0;
             case WM_LBUTTONUP:
                 self->mouseUp();
                 return 0;
             case CommitEditMessage:
                 self->finishEdit(wParam != 0);
+                return 0;
+            case WM_DPICHANGED:
+                self->changeDpi(HIWORD(wParam));
                 return 0;
             case WM_NCDESTROY:
             {
@@ -272,8 +305,18 @@ namespace
         {
             PAINTSTRUCT ps{};
             HDC target = BeginPaint(window, &ps), dc = CreateCompatibleDC(target);
-            HBITMAP bitmap = CreateCompatibleBitmap(target, Width, Height);
-            HGDIOBJ oldBitmap = SelectObject(dc, bitmap), oldFont = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+            RECT client{};
+            GetClientRect(window, &client);
+            int pixelWidth = std::max(1L, client.right), pixelHeight = std::max(1L, client.bottom);
+            HBITMAP bitmap = CreateCompatibleBitmap(target, pixelWidth, pixelHeight);
+            HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+            SetMapMode(dc, MM_ANISOTROPIC);
+            SetWindowExtEx(dc, Width, Height, nullptr);
+            SetViewportExtEx(dc, pixelWidth, pixelHeight, nullptr);
+            HFONT font = CreateFontA(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                     DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+            HGDIOBJ oldFont = SelectObject(dc, font ? font : GetStockObject(DEFAULT_GUI_FONT));
             SetBkMode(dc, TRANSPARENT);
             fill(dc, 0, 0, Width, Height, RGB(20, 23, 29));
             text(dc, 20, 12, RGB(238, 242, 248), "llawsxxDSP   EQ > Reverb > Loudness > Limiter");
@@ -297,15 +340,48 @@ namespace
             drawModules(dc);
             drawTabs(dc);
             drawControls(dc);
-            BitBlt(target, 0, 0, Width, Height, dc, 0, 0, SRCCOPY);
+            SetMapMode(dc, MM_TEXT);
+            BitBlt(target, 0, 0, pixelWidth, pixelHeight, dc, 0, 0, SRCCOPY);
             SelectObject(dc, oldFont);
             SelectObject(dc, oldBitmap);
+            if (font)
+                DeleteObject(font);
             DeleteObject(bitmap);
             DeleteDC(dc);
             EndPaint(window, &ps);
         }
 
         static bool inside(const RECT &r, int x, int y) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
+        POINT logicalPoint(int x, int y) const
+        {
+            RECT client{};
+            GetClientRect(window, &client);
+            return POINT{MulDiv(x, Width, std::max(1L, client.right)), MulDiv(y, Height, std::max(1L, client.bottom))};
+        }
+        RECT physicalRect(const RECT &logical) const
+        {
+            RECT client{};
+            GetClientRect(window, &client);
+            int width = std::max(1L, client.right), height = std::max(1L, client.bottom);
+            return RECT{MulDiv(logical.left, width, Width), MulDiv(logical.top, height, Height),
+                        MulDiv(logical.right, width, Width), MulDiv(logical.bottom, height, Height)};
+        }
+        void updateRect()
+        {
+            editorRect = ERect{0, 0, static_cast<VstInt16>(dpiScale(Height, dpi)), static_cast<VstInt16>(dpiScale(Width, dpi))};
+        }
+        void changeDpi(UINT newDpi)
+        {
+            newDpi = std::clamp(newDpi, 96u, 384u);
+            if (newDpi == dpi)
+                return;
+            finishEdit(true);
+            dpi = newDpi;
+            updateRect();
+            static_cast<AudioEffectX *>(effect)->sizeWindow(editorRect.right, editorRect.bottom);
+            if (window)
+                SetWindowPos(window, nullptr, 0, 0, editorRect.right, editorRect.bottom, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         int controlAt(int x, int y) const
         {
             for (int slot = 0; slot < tabCounts[selectedTab]; slot++)
@@ -353,7 +429,7 @@ namespace
         {
             finishEdit(true);
             editingParameter = tabParams[selectedTab][slot];
-            RECT r = inputRect(slot);
+            RECT r = physicalRect(inputRect(slot));
             char value[48];
             source->uiParameterText(editingParameter, value, sizeof(value));
             edit = CreateWindowExA(0, "EDIT", value, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
@@ -365,7 +441,10 @@ namespace
             }
             SetWindowLongPtrW(edit, GWLP_USERDATA, (LONG_PTR)this);
             originalEdit = (WNDPROC)SetWindowLongPtrW(edit, GWLP_WNDPROC, (LONG_PTR)editProc);
-            SendMessageW(edit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+            editFont = CreateFontA(-std::max(11, dpiScale(12, dpi)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                   DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+            SendMessageW(edit, WM_SETFONT, (WPARAM)(editFont ? editFont : GetStockObject(DEFAULT_GUI_FONT)), TRUE);
             SendMessageW(edit, EM_SETSEL, 0, -1);
             SetFocus(edit);
         }
@@ -384,6 +463,9 @@ namespace
             SetWindowLongPtrW(edit, GWLP_WNDPROC, (LONG_PTR)originalEdit);
             SetWindowLongPtrW(edit, GWLP_USERDATA, 0);
             DestroyWindow(edit);
+            if (editFont)
+                DeleteObject(editFont);
+            editFont = nullptr;
             edit = nullptr;
             originalEdit = nullptr;
             editingParameter = -1;
@@ -461,7 +543,10 @@ namespace
 
         SimpleDSPUiSource *source;
         HWND window = nullptr, edit = nullptr;
+        HFONT editFont = nullptr;
         WNDPROC original = nullptr, originalEdit = nullptr;
+        ERect editorRect{};
+        UINT dpi = 96;
         int density = 4096, selectedTab = 0, dragging = -1, editingParameter = -1;
     };
 }
