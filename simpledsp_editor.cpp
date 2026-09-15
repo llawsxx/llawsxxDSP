@@ -121,8 +121,8 @@ private:
         int column=slot%2,row=slot/2;int x=60+column*420,y=ContentTop+row*70;return RECT{x,y,x+360,y+58};
     }
     RECT inputRect(int slot) const { RECT r=controlRect(slot); return RECT{r.right-82,r.top+5,r.right-7,r.top+27}; }
-    int sliderStart(const RECT& r) const { return selectedTab==0?r.left+10:r.left+72; }
-    int sliderY(const RECT& r) const { return selectedTab==0?r.top+39:r.top+29; }
+    int sliderStart(const RECT& r) const { return r.left+10; }
+    int sliderY(const RECT& r) const { return r.top+39; }
 
     void drawModules(HDC dc){
         text(dc,20,321,RGB(176,184,195),"DSP:");
