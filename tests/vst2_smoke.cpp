@@ -1,5 +1,6 @@
 #include "aeffectx.h"
 #include <windows.h>
+#include <imm.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -13,6 +14,9 @@ static VstIntPtr VSTCALLBACK host(AEffect*, VstInt32 opcode, VstInt32, VstIntPtr
 
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
+    // Keep third-party IMEs out of the synthetic editor lifecycle test. Some
+    // IMEs are not AddressSanitizer-clean and otherwise obscure plugin errors.
+    ImmDisableIME(static_cast<DWORD>(-1));
     HMODULE module = LoadLibraryA(argv[1]);
     if (!module) { std::fprintf(stderr, "LoadLibrary failed: %lu\n", GetLastError()); return 3; }
     using Main = AEffect* (*)(audioMasterCallback);
