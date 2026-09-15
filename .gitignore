@@ -1,0 +1,24 @@
+# CMake and Visual Studio output
+/build/
+/build-*/
+/.vs/
+/out/
+CMakeUserPresets.json
+
+# Compiler products
+*.dll
+*.exe
+*.exp
+*.ilk
+*.lib
+*.obj
+*.pdb
+
+# Backup of the vendor repository metadata. SDK source files are tracked normally.
+/third_party/.VST_SDK_2.4.git-metadata/
+
+# Editor and OS files
+*.user
+*.suo
+.DS_Store
+Thumbs.db
