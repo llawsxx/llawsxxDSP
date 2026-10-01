@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -48,11 +49,15 @@ namespace
         Ceiling,
         Lookahead,
         Adaptive,
+        LoudBoostOnly,
+        LoudLookahead,
+        LoudUpdateMs,
         ParamCount
     };
     const char *names[ParamCount] = {"EQ On", "EQ1 Freq", "EQ1 Gain", "EQ1 Q", "EQ2 Freq", "EQ2 Gain", "EQ2 Q",
                                      "EQ3 Freq", "EQ3 Gain", "EQ3 Q", "EQ4 Freq", "EQ4 Gain", "EQ4 Q", "Rev On", "Room", "Decay", "Damping",
-                                     "Mix", "Loud On", "Target", "LRA", "TruePk", "Lim On", "Input", "Limit", "Release", "Ceiling", "Lookahead", "Adaptive"};
+                                     "Mix", "Loud On", "Target", "LRA", "TruePk", "Lim On", "Input", "Limit", "Release", "Ceiling", "Lookahead", "Adaptive",
+                                     "Boost Only", "Loud Look", "Update"};
     float cl(float x, float a, float b) { return std::max(a, std::min(b, x)); }
     double cld(double x, double a, double b) { return std::max(a, std::min(b, x)); }
     float lin(float n, float a, float b) { return a + cl(n, 0.f, 1.f) * (b - a); }
@@ -60,7 +65,40 @@ namespace
     float invlog(float x, float a, float b) { return std::log(cl(x, a, b) / a) / std::log(b / a); }
     float db2lin(float x) { return std::pow(10.f, x / 20.f); }
     float amp2db(float x) { return 20.f * std::log10(std::max(x, 1e-6f)); }
-    bool toggle(int i) { return i == EqOn || i == RevOn || i == LoudOn || i == LimOn || i == Adaptive; }
+    bool toggle(int i) { return i == EqOn || i == RevOn || i == LoudOn || i == LimOn || i == Adaptive || i == LoudBoostOnly; }
+
+    struct PeakWindow
+    {
+        std::vector<float> values;
+        std::vector<uint64_t> indices;
+        size_t head = 0, tail = 0;
+        uint64_t frame = 0;
+        void init(int maxDelay)
+        {
+            values.assign(maxDelay + 2, 0.f);
+            indices.assign(maxDelay + 2, 0);
+            reset();
+        }
+        void reset() { head = tail = 0; frame = 0; }
+        float push(float value, int span)
+        {
+            const size_t cap = values.size();
+            while (head != tail)
+            {
+                size_t previous = (tail + cap - 1) % cap;
+                if (values[previous] > value)
+                    break;
+                tail = previous;
+            }
+            values[tail] = value;
+            indices[tail] = frame;
+            tail = (tail + 1) % cap;
+            while (indices[head] + (uint64_t)span <= frame)
+                head = (head + 1) % cap;
+            frame++;
+            return values[head];
+        }
+    };
 
     struct Biquad
     {
@@ -93,7 +131,10 @@ namespace
 
     struct Loudness
     {
-        int rate = 48000, subFrames = 4800, subCount = 0, subPos = 0, subValid = 0, gatePos = 0, gateValid = 0, lraPos = 0, lraValid = 0, lraHop = 0;
+        int rate = 48000, subFrames = 4800, subCount = 0, subPos = 0, subValid = 0, gatePos = 0, gateValid = 0, lraPos = 0, lraValid = 0, lraHop = 0, updateBlocks = 0;
+        int maxDelay = 240, write = 0, filled = 0, lastDelay = 0;
+        std::vector<float> delayL, delayR;
+        PeakWindow peaks;
         double b[5]{}, a[5]{}, v[2][5]{}, subs[SubN]{}, gates[GateN]{}, lras[LraN]{}, subSum = 0, measuredLra = 0;
         double gain = 1, wanted = 1, gainCoef = 0, peakGain = 1, peakRelease = 0, tpLimit = 1, tpDb = 999;
         static double energy(double l) { return std::pow(10., (l + .691) / 10.); }
@@ -138,6 +179,10 @@ namespace
             a[3] = pa[1] * ra[2] + pa[2] * ra[1];
             a[4] = pa[2] * ra[2];
             subFrames = std::max(1, (rate + 5) / 10);
+            maxDelay = std::max(1, (int)(rate * .05f));
+            delayL.assign(maxDelay + 1, 0.f);
+            delayR.assign(maxDelay + 1, 0.f);
+            peaks.init(maxDelay);
             peakRelease = 1 - std::exp(-1. / (rate * .1));
             reset();
         }
@@ -147,11 +192,20 @@ namespace
             std::memset(subs, 0, sizeof(subs));
             std::memset(gates, 0, sizeof(gates));
             std::memset(lras, 0, sizeof(lras));
-            subCount = subPos = subValid = gatePos = gateValid = lraPos = lraValid = lraHop = 0;
+            subCount = subPos = subValid = gatePos = gateValid = lraPos = lraValid = lraHop = updateBlocks = 0;
             subSum = measuredLra = 0;
             gain = wanted = peakGain = tpLimit = 1;
             gainCoef = 0;
             tpDb = 999;
+            resetDelay();
+        }
+        void resetDelay()
+        {
+            std::fill(delayL.begin(), delayL.end(), 0.f);
+            std::fill(delayR.begin(), delayR.end(), 0.f);
+            peaks.reset();
+            write = filled = lastDelay = 0;
+            peakGain = 1;
         }
         double filter(int c, double x)
         {
@@ -201,7 +255,7 @@ namespace
             if (sn >= 4)
                 measuredLra = sorted[(int)std::ceil(.95 * (sn - 1))] - sorted[(int)std::floor(.10 * (sn - 1))];
         }
-        void target(float target, float targetLra)
+        void target(float target, float targetLra, bool boostOnly, int intervalMs)
         {
             if (subValid < 4)
                 return;
@@ -235,14 +289,24 @@ namespace
                 return;
             if (count == SubN)
                 updateLra(se);
+            int intervalBlocks = std::max(1, std::min(30, (intervalMs + 50) / 100));
+            if (++updateBlocks < intervalBlocks)
+                return;
+            updateBlocks = 0;
             double corr = measuredLra > targetLra ? (st - integrated) * (targetLra / measuredLra - 1) : 0;
             double gd = cld(target - integrated + cld(corr, -6, 6), -12, 18);
+            if (boostOnly)
+                gd = std::max(0., gd);
             wanted = std::pow(10., gd / 20.);
             double tau = wanted < gain ? .08 : std::min(1.5, .25 + .035 * targetLra);
             gainCoef = 1 - std::exp(-1. / (rate * tau));
         }
-        void run(float &l, float &r, float targetDb, float targetLra, float trueDb)
+        void run(float &l, float &r, float targetDb, float targetLra, float trueDb, bool boostOnly, float lookMs, int intervalMs)
         {
+            int delay = std::max(1, std::min(maxDelay, (int)(cl(lookMs, 5.f, 50.f) * rate / 1000)));
+            if (lastDelay && lastDelay != delay)
+                resetDelay();
+            lastDelay = delay;
             if (trueDb != tpDb)
             {
                 tpDb = trueDb;
@@ -257,19 +321,32 @@ namespace
                 subValid = std::min(subValid + 1, SubN);
                 subSum = 0;
                 subCount = 0;
-                target(targetDb, targetLra);
+                target(targetDb, targetLra, boostOnly, intervalMs);
             }
             gain += (wanted - gain) * gainCoef;
             gain = cld(gain, .0630957, 7.94328);
-            double peak = std::max(std::fabs(l), std::fabs(r)), applied = gain * peakGain;
+            int cap = (int)delayL.size();
+            delayL[write] = l;
+            delayR[write] = r;
+            float future = peaks.push(std::max(std::fabs(l), std::fabs(r)), delay + 1);
+            write = (write + 1) % cap;
+            filled = std::min(filled + 1, cap);
+            double applied = gain * peakGain;
+            double peak = future;
             if (peak > 1e-9 && peak * applied > tpLimit)
                 peakGain = std::min(peakGain, tpLimit / (peak * gain));
             else
                 peakGain += (1 - peakGain) * peakRelease;
             peakGain = cld(peakGain, 0, 1);
             applied = gain * peakGain;
-            l = (float)(l * applied);
-            r = (float)(r * applied);
+            if (filled <= delay)
+            {
+                l = r = 0;
+                return;
+            }
+            int out = (write + cap - delay - 1) % cap;
+            l = (float)cld(delayL[out] * applied, -tpLimit, tpLimit);
+            r = (float)cld(delayR[out] * applied, -tpLimit, tpLimit);
         }
     };
 
@@ -277,21 +354,22 @@ namespace
     {
         int rate = 48000, maxDelay = 240, write = 0, filled = 0, lastDelay = 0;
         float envelope = 1, activity = 0;
-        std::vector<float> l, r, p;
+        std::vector<float> l, r;
+        PeakWindow peaks;
         void init(int sr)
         {
             rate = std::max(sr, 8000);
-            maxDelay = std::max(1, (int)std::ceil(rate * .005));
+            maxDelay = std::max(1, (int)std::ceil(rate * .05));
             l.assign(maxDelay + 1, 0);
             r.assign(maxDelay + 1, 0);
-            p.assign(maxDelay + 1, 0);
+            peaks.init(maxDelay);
             reset();
         }
         void reset()
         {
             std::fill(l.begin(), l.end(), 0.f);
             std::fill(r.begin(), r.end(), 0.f);
-            std::fill(p.begin(), p.end(), 0.f);
+            peaks.reset();
             write = filled = lastDelay = 0;
             envelope = 1;
             activity = 0;
@@ -305,17 +383,9 @@ namespace
             float ig = db2lin(inputDb), limit = std::min(db2lin(limitDb), db2lin(ceilingDb)), ceiling = db2lin(ceilingDb);
             l[write] = x * ig;
             r[write] = y * ig;
-            p[write] = std::max(std::fabs(l[write]), std::fabs(r[write]));
+            float future = peaks.push(std::max(std::fabs(l[write]), std::fabs(r[write])), delay + 1);
             write = (write + 1) % cap;
             filled = std::min(filled + 1, cap);
-            float future = 0;
-            for (int i = 1; i <= std::min(filled, delay + 1); i++)
-            {
-                int at = write - i;
-                if (at < 0)
-                    at += cap;
-                future = std::max(future, p[at]);
-            }
             float wanted = future > limit ? limit / future : 1;
             if (adaptive)
             {
@@ -405,8 +475,11 @@ public:
         param[Limit] = .95f;
         param[Release] = invlog(100, 10, 1000);
         param[Ceiling] = 11.f / 12.f;
-        param[Lookahead] = 1;
+        param[Lookahead] = (5.f - .1f) / (50.f - .1f);
         param[Adaptive] = 1;
+        param[LoudBoostOnly] = 0;
+        param[LoudLookahead] = 0;
+        param[LoudUpdateMs] = 9.f / 29.f;
     }
     void resume() override
     {
@@ -435,7 +508,7 @@ public:
         param[i].store(cl(x, 0, 1));
         if (i == RevOn || i == Room || i == Decay || i == Damp)
             requestReverb();
-        if (i == Lookahead || i == LimOn)
+        if (i == Lookahead || i == LimOn || i == LoudLookahead || i == LoudOn)
             latency();
     }
     float getParameter(VstInt32 i) override { return i >= 0 && i < ParamCount ? param[i].load() : 0; }
@@ -469,7 +542,11 @@ public:
         if (i == Ceiling)
             return lin(x, -12, 0);
         if (i == Lookahead)
-            return lin(x, .1f, 5);
+            return lin(x, .1f, 50);
+        if (i == LoudLookahead)
+            return lin(x, 5, 50);
+        if (i == LoudUpdateMs)
+            return 100.f + 100.f * std::round(x * 29.f);
         return x;
     }
     void getParameterName(VstInt32 i, char *s) override { vst_strncpy(s, i >= 0 && i < ParamCount ? names[i] : "", kVstMaxParamStrLen); }
@@ -485,7 +562,7 @@ public:
             u = "%";
         else if (i == Decay)
             u = "s";
-        else if (i == Release || i == Lookahead)
+        else if (i == Release || i == Lookahead || i == LoudLookahead || i == LoudUpdateMs)
             u = "ms";
         else if (i == Lra)
             u = "LU";
@@ -555,9 +632,10 @@ public:
                 r = r * (1 - p[Mix]) + wr * p[Mix];
             }
             if (loudOn)
-                loud.run(l, r, lin(p[Target], -70, -5), lin(p[Lra], 1, 50), lin(p[TruePeak], -9, 0));
+                loud.run(l, r, lin(p[Target], -70, -5), lin(p[Lra], 1, 50), lin(p[TruePeak], -9, 0),
+                         p[LoudBoostOnly] >= .5f, lin(p[LoudLookahead], 5, 50), (int)(100.f + 100.f * std::round(p[LoudUpdateMs] * 29.f)));
             if (limOn)
-                limiter.run(l, r, lin(p[LimInput], -12, 24), lin(p[Limit], -20, 0), logmap(p[Release], 10, 1000), lin(p[Ceiling], -12, 0), lin(p[Lookahead], .1f, 5), p[Adaptive] >= .5f);
+                limiter.run(l, r, lin(p[LimInput], -12, 24), lin(p[Limit], -20, 0), logmap(p[Release], 10, 1000), lin(p[Ceiling], -12, 0), lin(p[Lookahead], .1f, 50), p[Adaptive] >= .5f);
             out[0][i] = l;
             out[1][i] = r;
             meter(std::max(std::fabs(l), std::fabs(r)), meterOut, heldOut, holdOut, mr, hr);
@@ -570,6 +648,9 @@ public:
         meterOutPub = meterOut;
         heldInPub = heldIn;
         heldOutPub = heldOut;
+        loudGainDbPub = loudOn ? amp2db((float)loud.gain) : 0.f;
+        loudPeakGainDbPub = loudOn ? amp2db((float)loud.peakGain) : 0.f;
+        limiterGainDbPub = limOn ? amp2db(limiter.envelope) : 0.f;
     }
     float uiParameter(int i) const override { return i >= 0 && i < ParamCount ? param[i].load() : 0; }
     void uiSetParameter(int i, float x) override { setParameterAutomated(i, x); }
@@ -612,7 +693,11 @@ public:
         else if (i == Ceiling)
             n = (v + 12) / 12;
         else if (i == Lookahead)
-            n = (v - .1f) / 4.9f;
+            n = (v - .1f) / 49.9f;
+        else if (i == LoudLookahead)
+            n = (v - 5.f) / 45.f;
+        else if (i == LoudUpdateMs)
+            n = (std::round(v / 100.f) * 100.f - 100.f) / 2900.f;
         setParameterAutomated(i, cl(n, 0, 1));
     }
     void uiCopyWave(int count, float *in, float *out) const override
@@ -630,6 +715,9 @@ public:
     float uiOutputDb() const override { return amp2db(meterOutPub.load()); }
     float uiInputPeakDb() const override { return amp2db(heldInPub.load()); }
     float uiOutputPeakDb() const override { return amp2db(heldOutPub.load()); }
+    float uiLoudnessGainDb() const override { return loudGainDbPub.load(); }
+    float uiLoudnessPeakGainDb() const override { return loudPeakGainDbPub.load(); }
+    float uiLimiterGainDb() const override { return limiterGainDbPub.load(); }
 
 private:
     void format(int i, char *s, int z) const
@@ -650,10 +738,12 @@ private:
             std::snprintf(s, z, "%.0f%%", x);
         else if (i == Decay)
             std::snprintf(s, z, "%.2f s", x);
-        else if (i == Release)
+        else if (i == Release || i == LoudUpdateMs)
             std::snprintf(s, z, "%.0f ms", x);
         else if (i == Lookahead)
             std::snprintf(s, z, "%.2f ms", x);
+        else if (i == LoudLookahead)
+            std::snprintf(s, z, "%.0f ms", x);
         else if (i == Lra)
             std::snprintf(s, z, "%.1f LU", x);
         else
@@ -695,8 +785,12 @@ private:
     }
     void latency()
     {
-        bool on = param[LimOn].load() >= .5f;
-        setInitialDelay(on ? std::max(1, (int)(actual(Lookahead) * rate / 1000)) : 0);
+        int delay = 0;
+        if (param[LoudOn].load() >= .5f)
+            delay += std::max(1, (int)(actual(LoudLookahead) * rate / 1000));
+        if (param[LimOn].load() >= .5f)
+            delay += std::max(1, (int)(actual(Lookahead) * rate / 1000));
+        setInitialDelay(delay);
         updateDisplay();
     }
     void meter(float p, float &now, float &held, int &frames, float mr, float hr)
@@ -717,6 +811,7 @@ private:
         meterIn = meterOut = heldIn = heldOut = 0;
         holdIn = holdOut = 0;
         meterInPub = meterOutPub = heldInPub = heldOutPub = 0;
+        loudGainDbPub = loudPeakGainDbPub = limiterGainDbPub = 0;
     }
     std::array<std::atomic<float>, ParamCount> param;
     Biquad eq[2][Bands];
@@ -735,6 +830,7 @@ private:
     float meterIn = 0, meterOut = 0, heldIn = 0, heldOut = 0;
     int holdIn = 0, holdOut = 0;
     std::atomic<float> meterInPub{0}, meterOutPub{0}, heldInPub{0}, heldOutPub{0};
+    std::atomic<float> loudGainDbPub{0}, loudPeakGainDbPub{0}, limiterGainDbPub{0};
 };
 
 AudioEffect *createEffectInstance(audioMasterCallback cb) { return new SimpleDSP(cb); }

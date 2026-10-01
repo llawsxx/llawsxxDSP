@@ -9,22 +9,24 @@
 
 namespace
 {
-    constexpr int Width = 920, Height = 650, ParamCount = 29, WaveMax = 16384;
+    constexpr int Width = 920, Height = 650, ParamCount = 32, WaveMax = 16384;
     constexpr UINT CommitEditMessage = WM_APP + 37;
     constexpr int SwitchTop = 314, TabTop = 350, ContentTop = 398;
     constexpr int moduleParams[4] = {0, 13, 18, 22};
-    constexpr int tabCounts[4] = {12, 4, 3, 6};
+    constexpr int tabCounts[4] = {12, 4, 6, 6};
     constexpr int tabParams[4][12] = {
         {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
         {14, 15, 16, 17, -1, -1, -1, -1, -1, -1, -1, -1},
-        {19, 20, 21, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+        {19, 20, 21, 29, 30, 31, -1, -1, -1, -1, -1, -1},
         {23, 24, 25, 26, 27, 28, -1, -1, -1, -1, -1, -1}};
     const char *moduleNames[4] = {"EQUALIZER", "REVERB", "LOUDNESS", "LIMITER"};
     const char *names[ParamCount] = {
         "EQ On", "EQ1 Freq", "EQ1 Gain", "EQ1 Q", "EQ2 Freq", "EQ2 Gain", "EQ2 Q",
         "EQ3 Freq", "EQ3 Gain", "EQ3 Q", "EQ4 Freq", "EQ4 Gain", "EQ4 Q", "Rev On",
         "Room", "Decay", "Damping", "Mix", "Loud On", "Target", "LRA", "TruePk", "Lim On",
-        "Input", "Limit", "Release", "Ceiling", "Lookahead", "Adaptive"};
+        "Input", "Limit", "Release", "Ceiling", "Lookahead", "Adaptive",
+        "Boost Only", "Lookahead", "Update Interval"};
+    bool isToggle(int parameter) { return parameter == 28 || parameter == 29; }
     float clampf(float x, float a, float b) { return std::max(a, std::min(b, x)); }
     UINT windowDpi(HWND window)
     {
@@ -279,7 +281,7 @@ namespace
                 fill(dc, r.left, r.top, r.right, r.bottom, RGB(28, 32, 40));
                 text(dc, r.left + 10, r.top + 8, RGB(198, 205, 215), names[parameter]);
                 float value = source->uiParameter(parameter);
-                if (parameter == 28)
+                if (isToggle(parameter))
                 {
                     fill(dc, r.left + 92, r.top + 5, r.left + 150, r.top + 29, value >= .5f ? RGB(43, 142, 95) : RGB(58, 63, 72));
                     text(dc, r.left + 109, r.top + 9, RGB(245, 247, 250), value >= .5f ? "ON" : "OFF");
@@ -298,6 +300,33 @@ namespace
                     line(dc, input.left, input.bottom, input.right, input.bottom, RGB(76, 84, 96));
                     text(dc, input.left + 4, input.top + 4, RGB(218, 225, 234), display);
                 }
+            }
+        }
+
+        void drawGainStatus(HDC dc)
+        {
+            constexpr int top = 606, bottom = 638;
+            char value[24];
+            if (selectedTab == 2)
+            {
+                fill(dc, 60, top, 430, bottom, RGB(24, 28, 35));
+                text(dc, 74, top + 10, RGB(170, 179, 191), "Loudness Gain");
+                std::snprintf(value, sizeof(value), "%+.1f dB", source->uiLoudnessGainDb());
+                text(dc, 320, top + 10, RGB(83, 190, 242), value);
+
+                fill(dc, 470, top, 840, bottom, RGB(24, 28, 35));
+                text(dc, 484, top + 10, RGB(170, 179, 191), "Peak Gain");
+                float gain = source->uiLoudnessPeakGainDb();
+                std::snprintf(value, sizeof(value), "%+.1f dB", gain);
+                text(dc, 730, top + 10, gain < -.05f ? RGB(255, 177, 84) : RGB(120, 205, 153), value);
+            }
+            else if (selectedTab == 3)
+            {
+                fill(dc, 60, top, 840, bottom, RGB(24, 28, 35));
+                text(dc, 74, top + 10, RGB(170, 179, 191), "Limiter Gain");
+                float gain = source->uiLimiterGainDb();
+                std::snprintf(value, sizeof(value), "%+.1f dB", gain);
+                text(dc, 730, top + 10, gain < -.05f ? RGB(255, 177, 84) : RGB(120, 205, 153), value);
             }
         }
 
@@ -340,6 +369,7 @@ namespace
             drawModules(dc);
             drawTabs(dc);
             drawControls(dc);
+            drawGainStatus(dc);
             SetMapMode(dc, MM_TEXT);
             BitBlt(target, 0, 0, pixelWidth, pixelHeight, dc, 0, 0, SRCCOPY);
             SelectObject(dc, oldFont);
@@ -507,13 +537,13 @@ namespace
             if (slot < 0)
                 return;
             int parameter = tabParams[selectedTab][slot];
-            if (parameter != 28 && inside(inputRect(slot), x, y))
+            if (!isToggle(parameter) && inside(inputRect(slot), x, y))
             {
                 beginTextEdit(slot);
                 return;
             }
             source->uiBeginEdit(parameter);
-            if (parameter == 28)
+            if (isToggle(parameter))
             {
                 source->uiSetParameter(parameter, source->uiParameter(parameter) >= .5f ? 0.f : 1.f);
                 source->uiEndEdit(parameter);

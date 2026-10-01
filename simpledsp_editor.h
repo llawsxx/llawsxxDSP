@@ -15,6 +15,9 @@ public:
     virtual float uiOutputDb() const = 0;
     virtual float uiInputPeakDb() const = 0;
     virtual float uiOutputPeakDb() const = 0;
+    virtual float uiLoudnessGainDb() const = 0;
+    virtual float uiLoudnessPeakGainDb() const = 0;
+    virtual float uiLimiterGainDb() const = 0;
 };
 
 AEffEditor* createSimpleDSPEditor(AudioEffect* effect, SimpleDSPUiSource* source);

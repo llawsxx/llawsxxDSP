@@ -13,11 +13,13 @@ VST2 的宿主。处理链顺序为：
 
 - 四段参数均衡器：中心频率、增益、Q 值。
 - 卷积混响：Room、Decay、Damping、Mix。
-- BS.1770 风格响度标准化：目标 LUFS、目标 LRA、True Peak 上限。
+- BS.1770 风格响度标准化：目标 LUFS、目标 LRA、True Peak 上限、仅增大音量、
+  5–50 ms 前瞻，以及 100–3000 ms 的目标增益更新间隔（默认 1000 ms）。
 - 立体声联动前瞻限制器：输入增益、阈值、释放、Ceiling、Lookahead、
-  Adaptive Release。
+  Adaptive Release；Lookahead 最大 50 ms。
 - 输入和输出实时 dB 电平条。
 - 输入和输出 1.5 秒峰值保持及峰值 dB 数字。
+- 响度校正增益、True Peak 保护增益和限制器增益实时显示。
 - 输入和输出波形，可显示最近 1024、2048、4096、8192 或 16384 个采样点。
 - EQ、Reverb、Loudness、Limiter 参数分别放在独立 Tab 中。
 - 参数支持宿主自动化、滑块调整和手动输入。
@@ -34,10 +36,15 @@ VST2 的宿主。处理链顺序为：
 - Room、Damping、Mix 输入百分比，例如 `75`。
 - Decay 输入秒，例如 `1.5`。
 - Release 和 Lookahead 输入毫秒，例如 `100` 或 `5`。
+- 响度 Update Interval 输入毫秒，例如 `1000`；以 100 ms 为步长调整。
 - Q 和 LRA 直接输入数值。
 
 按 Enter 提交，按 Esc 取消；输入框失去焦点时也会提交。超出合法范围的值会
 自动限制到该参数的最小值或最大值。
+
+启用“Boost Only”时，响度目标增益只会增加音量；True Peak 保护仍可能降低
+瞬时输出。响度标准化和限制器的 Lookahead 都会增加延迟，同时启用时延迟相加，
+插件会向宿主报告总延迟。
 
 ## 源码结构
 
@@ -78,7 +85,7 @@ cmake -S . -B build-vs -DVST2_SDK="D:\path\to\VST_SDK_2.4"
 将 `llawsxxDSP.dll` 复制到 OBS 可以访问的 VST2 目录，重新启动 OBS，然后在
 音频源的“滤镜”中添加 VST 2.x 插件。
 
-OBS 会把 29 个标准化参数保存到当前场景集合的 `chunk_data` 中。Windows 下的
+OBS 会把 32 个标准化参数保存到当前场景集合的 `chunk_data` 中。Windows 下的
 场景集合通常位于：
 
 ```text

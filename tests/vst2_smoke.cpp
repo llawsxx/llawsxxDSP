@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 static VstInt32 requestedEditorWidth = 0;
@@ -32,7 +33,7 @@ int main(int argc, char** argv) {
     if (!mainEntry) return 4;
     AEffect* effect = mainEntry(host);
     if (!effect || effect->magic != kEffectMagic || effect->numInputs != 2 ||
-        effect->numOutputs != 2 || effect->numParams != 29 || !(effect->flags & effFlagsHasEditor)) return 5;
+        effect->numOutputs != 2 || effect->numParams != 32 || !(effect->flags & effFlagsHasEditor)) return 5;
     if (effect->getParameter(effect, 0) >= 0.5f || effect->getParameter(effect, 13) >= 0.5f ||
         effect->getParameter(effect, 18) >= 0.5f || effect->getParameter(effect, 22) >= 0.5f) return 15;
     effect->dispatcher(effect, effOpen, 0, 0, nullptr, 0);
@@ -103,6 +104,79 @@ int main(int argc, char** argv) {
     }
     if (normalizedPeak < 0.06f || normalizedPeak > 0.91f) return 22;
     effect->setParameter(effect, 18, 0.f);
+    std::fill(inL.begin(), inL.end(), 0.f);
+    std::fill(inR.begin(), inR.end(), 0.f);
+    effect->processReplacing(effect, inputs, outputs, frames);
+
+    char display[32]{};
+    effect->dispatcher(effect, effGetParamDisplay, 31, 0, display, 0);
+    if (std::strcmp(display, "1000 ms") != 0) return 25;
+    effect->setParameter(effect, 31, 0.f);
+    effect->dispatcher(effect, effGetParamDisplay, 31, 0, display, 0);
+    if (std::strcmp(display, "100 ms") != 0) return 26;
+    effect->setParameter(effect, 31, 1.f);
+    effect->dispatcher(effect, effGetParamDisplay, 31, 0, display, 0);
+    if (std::strcmp(display, "3000 ms") != 0) return 27;
+    effect->setParameter(effect, 31, 9.f / 29.f);
+
+    effect->setParameter(effect, 30, 1.f);
+    effect->setParameter(effect, 18, 1.f);
+    if (effect->initialDelay != 2400) return 28;
+    int firstLoud = -1;
+    for (int block = 0; block < 11; ++block) {
+        std::fill(inL.begin(), inL.end(), 0.f);
+        std::fill(inR.begin(), inR.end(), 0.f);
+        if (block == 0) inL[0] = inR[0] = .1f;
+        effect->processReplacing(effect, inputs, outputs, frames);
+        for (int i = 0; i < frames; ++i)
+            if (firstLoud < 0 && std::fabs(outL[i]) > .05f) firstLoud = block * frames + i;
+    }
+    if (firstLoud != 2400) return 29;
+    effect->setParameter(effect, 18, 0.f);
+    effect->processReplacing(effect, inputs, outputs, frames);
+    effect->setParameter(effect, 27, 1.f);
+    effect->setParameter(effect, 22, 1.f);
+    int firstLimiter = -1;
+    for (int block = 0; block < 11; ++block) {
+        std::fill(inL.begin(), inL.end(), 0.f);
+        std::fill(inR.begin(), inR.end(), 0.f);
+        if (block == 0) inL[0] = inR[0] = .1f;
+        effect->processReplacing(effect, inputs, outputs, frames);
+        for (int i = 0; i < frames; ++i)
+            if (firstLimiter < 0 && std::fabs(outL[i]) > .05f) firstLimiter = block * frames + i;
+    }
+    if (firstLimiter != 2400) return 34;
+    effect->setParameter(effect, 18, 1.f);
+    if (effect->initialDelay != 4800) return 30;
+    effect->setParameter(effect, 18, 0.f);
+    if (effect->initialDelay != 2400) return 31;
+    effect->setParameter(effect, 22, 0.f);
+    if (effect->initialDelay != 0) return 32;
+
+    // A loud input should be reduced toward a quiet target only when boost-only is off.
+    auto runLoud = [&](bool boostOnly) {
+        effect->setParameter(effect, 18, 0.f);
+        effect->processReplacing(effect, inputs, outputs, frames);
+        effect->setParameter(effect, 19, 40.f / 65.f); // -30 LUFS
+        effect->setParameter(effect, 30, 0.f);
+        effect->setParameter(effect, 31, 0.f); // 100 ms updates
+        effect->setParameter(effect, 29, boostOnly ? 1.f : 0.f);
+        effect->setParameter(effect, 18, 1.f);
+        double sum = 0;
+        for (int block = 0; block < 1000; ++block) {
+            for (int i = 0; i < frames; ++i) {
+                inL[i] = inR[i] = .2f * std::sin(static_cast<float>(phase));
+                phase += 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
+            }
+            effect->processReplacing(effect, inputs, outputs, frames);
+            if (block > 900) for (float sample : outL) sum += sample * sample;
+        }
+        return std::sqrt(sum / (99 * frames));
+    };
+    const double reducedRms = runLoud(false);
+    const double boostOnlyRms = runLoud(true);
+    if (reducedRms >= boostOnlyRms * .8 || boostOnlyRms < .13) return 33;
+    effect->setParameter(effect, 18, 0.f);
 
     effect->setParameter(effect, 13, 1.f);
     effect->setParameter(effect, 17, 1.f);
@@ -157,6 +231,13 @@ int main(int argc, char** argv) {
     SendMessageW(valueEdit, WM_KEYDOWN, VK_RETURN, 0);
     SendMessageW(editor, WM_APP + 37, 1, 0);
     if (effect->getParameter(effect, 14) < 0.74f || effect->getParameter(effect, 14) > 0.76f) return 18;
+    // Exercise the live gain readouts on the loudness and limiter tabs.
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, editorPoint(470, 365));
+    SendMessageW(editor, WM_LBUTTONUP, 0, editorPoint(470, 365));
+    UpdateWindow(editor);
+    SendMessageW(editor, WM_LBUTTONDOWN, MK_LBUTTON, editorPoint(690, 365));
+    SendMessageW(editor, WM_LBUTTONUP, 0, editorPoint(690, 365));
+    UpdateWindow(editor);
     SendMessageW(editor, WM_DPICHANGED, MAKELPARAM(144, 144), 0);
     RECT scaledClient{};
     GetClientRect(editor, &scaledClient);
